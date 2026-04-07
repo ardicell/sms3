@@ -1,0 +1,290 @@
+name: Build SMS Backup APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: 17
+          distribution: 'temurin'
+
+      - name: Create project structure
+        run: |
+          mkdir -p app/src/main/java/com/example/smsbackup
+          mkdir -p app/src/main/res/values
+
+      - name: Write AndroidManifest.xml
+        run: |
+          cat > app/src/main/AndroidManifest.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+              package="com.example.smsbackup">
+              <uses-permission android:name="android.permission.READ_SMS" />
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+              <application android:allowBackup="true" android:label="SMS Backup Remote"
+                  android:theme="@android:style/Theme.DeviceDefault.Light">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+      - name: Write MainActivity.java (fixed)
+        run: |
+          cat > app/src/main/java/com/example/smsbackup/MainActivity.java << 'EOF'
+          package com.example.smsbackup;
+          import android.Manifest;
+          import android.content.pm.PackageManager;
+          import android.database.Cursor;
+          import android.net.Uri;
+          import android.os.Bundle;
+          import android.os.Environment;
+          import android.widget.*;
+          import androidx.annotation.NonNull;
+          import androidx.appcompat.app.AppCompatActivity;
+          import androidx.core.app.ActivityCompat;
+          import androidx.core.content.ContextCompat;
+          import java.io.*;
+          import java.text.SimpleDateFormat;
+          import java.util.Date;
+          import java.util.Locale;
+          import fi.iki.elonen.NanoHTTPD;
+          public class MainActivity extends AppCompatActivity {
+              private static final int PERMISSION_REQUEST_CODE = 123;
+              private SimpleServer server;
+              private TextView statusText;
+              private Button startStopBtn;
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  LinearLayout layout = new LinearLayout(this);
+                  layout.setOrientation(LinearLayout.VERTICAL);
+                  layout.setPadding(50,50,50,50);
+                  statusText = new TextView(this);
+                  statusText.setText("Server status: Stopped");
+                  startStopBtn = new Button(this);
+                  startStopBtn.setText("Start Server");
+                  startStopBtn.setOnClickListener(v -> toggleServer());
+                  Button manualBackup = new Button(this);
+                  manualBackup.setText("Manual Backup SMS");
+                  manualBackup.setOnClickListener(v -> doBackup());
+                  layout.addView(statusText);
+                  layout.addView(startStopBtn);
+                  layout.addView(manualBackup);
+                  setContentView(layout);
+                  checkPermissions();
+              }
+              private void checkPermissions() {
+                  String[] perms = {Manifest.permission.READ_SMS, Manifest.permission.WRITE_EXTERNAL_STORAGE};
+                  if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_SMS) != PackageManager.PERMISSION_GRANTED ||
+                      ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
+                      ActivityCompat.requestPermissions(this, perms, PERMISSION_REQUEST_CODE);
+                  }
+              }
+              @Override
+              public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
+                  super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+                  if (requestCode == PERMISSION_REQUEST_CODE) {
+                      if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED)
+                          Toast.makeText(this, "Permission granted", Toast.LENGTH_SHORT).show();
+                      else
+                          Toast.makeText(this, "SMS permission needed", Toast.LENGTH_LONG).show();
+                  }
+              }
+              private void toggleServer() {
+                  if (server == null) {
+                      try {
+                          server = new SimpleServer(8080, this);
+                          server.start();
+                          startStopBtn.setText("Stop Server");
+                          statusText.setText("Server status: Running on port 8080");
+                      } catch (IOException e) {
+                          Toast.makeText(this, "Failed to start server: " + e.getMessage(), Toast.LENGTH_LONG).show();
+                      }
+                  } else {
+                      server.stop();
+                      server = null;
+                      startStopBtn.setText("Start Server");
+                      statusText.setText("Server status: Stopped");
+                  }
+              }
+              private void doBackup() {
+                  String xml = exportSmsToXml();
+                  if (xml != null) Toast.makeText(this, "Backup saved: " + xml, Toast.LENGTH_LONG).show();
+                  else Toast.makeText(this, "Backup failed", Toast.LENGTH_LONG).show();
+              }
+              private String exportSmsToXml() {
+                  if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_SMS) != PackageManager.PERMISSION_GRANTED) return null;
+                  StringBuilder xmlBuilder = new StringBuilder();
+                  xmlBuilder.append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<smses>\n");
+                  Uri uri = Uri.parse("content://sms/inbox");
+                  Cursor cursor = getContentResolver().query(uri, null, null, null, "date ASC");
+                  if (cursor != null) {
+                      while (cursor.moveToNext()) {
+                          String address = cursor.getString(cursor.getColumnIndexOrThrow("address"));
+                          String body = cursor.getString(cursor.getColumnIndexOrThrow("body"));
+                          long date = cursor.getLong(cursor.getColumnIndexOrThrow("date"));
+                          xmlBuilder.append(String.format(Locale.US, "  <sms type=\"inbox\" address=\"%s\" date=\"%d\">%s</sms>\n", escapeXml(address), date, escapeXml(body)));
+                      }
+                      cursor.close();
+                  }
+                  uri = Uri.parse("content://sms/sent");
+                  cursor = getContentResolver().query(uri, null, null, null, "date ASC");
+                  if (cursor != null) {
+                      while (cursor.moveToNext()) {
+                          String address = cursor.getString(cursor.getColumnIndexOrThrow("address"));
+                          String body = cursor.getString(cursor.getColumnIndexOrThrow("body"));
+                          long date = cursor.getLong(cursor.getColumnIndexOrThrow("date"));
+                          xmlBuilder.append(String.format(Locale.US, "  <sms type=\"sent\" address=\"%s\" date=\"%d\">%s</sms>\n", escapeXml(address), date, escapeXml(body)));
+                      }
+                      cursor.close();
+                  }
+                  xmlBuilder.append("</smses>");
+                  String filename = "sms_backup_" + new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date()) + ".xml";
+                  File dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+                  if (!dir.exists()) dir.mkdirs();
+                  File file = new File(dir, filename);
+                  try (FileWriter fw = new FileWriter(file)) { fw.write(xmlBuilder.toString()); return file.getAbsolutePath(); }
+                  catch (IOException e) { return null; }
+              }
+              private String escapeXml(String s) {
+                  if (s == null) return "";
+                  return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;");
+              }
+              private class SimpleServer extends NanoHTTPD {
+                  private MainActivity activity;
+                  public SimpleServer(int port, MainActivity act) throws IOException { super(port); activity = act; }
+                  @Override
+                  public Response serve(IHTTPSession session) {
+                      String uri = session.getUri();
+                      if ("/backup".equals(uri)) {
+                          String filePath = activity.exportSmsToXml();
+                          if (filePath != null) {
+                              File file = new File(filePath);
+                              if (file.exists()) {
+                                  Response resp = newFixedLengthResponse(Response.Status.OK, "application/xml", null);
+                                  try {
+                                      resp.setData(new FileInputStream(file));
+                                      resp.addHeader("Content-Length", String.valueOf(file.length()));
+                                  } catch (FileNotFoundException e) {
+                                      return newFixedLengthResponse(Response.Status.INTERNAL_ERROR, "text/plain", "File not found");
+                                  }
+                                  resp.addHeader("Content-Disposition", "attachment; filename=\"" + file.getName() + "\"");
+                                  resp.addHeader("Access-Control-Allow-Origin", "*");
+                                  return resp;
+                              }
+                          }
+                          return newFixedLengthResponse(Response.Status.INTERNAL_ERROR, "text/plain", "Backup failed");
+                      } else if ("/list".equals(uri)) {
+                          File dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+                          File[] files = dir.listFiles((d, name) -> name.startsWith("sms_backup_") && name.endsWith(".xml"));
+                          StringBuilder html = new StringBuilder("<html><body><ul>");
+                          if (files != null) for (File f : files) html.append("<li><a href='/download?file=").append(f.getName()).append("'>").append(f.getName()).append("</a></li>");
+                          html.append("</ul></body></html>");
+                          Response resp = newFixedLengthResponse(html.toString());
+                          resp.addHeader("Access-Control-Allow-Origin", "*");
+                          return resp;
+                      } else if (uri.startsWith("/download")) {
+                          String fileName = session.getParms().get("file");
+                          if (fileName != null && !fileName.contains("..")) {
+                              File file = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), fileName);
+                              if (file.exists()) {
+                                  try {
+                                      Response resp = newFixedLengthResponse(Response.Status.OK, "application/xml", null);
+                                      resp.setData(new FileInputStream(file));
+                                      resp.addHeader("Content-Length", String.valueOf(file.length()));
+                                      resp.addHeader("Content-Disposition", "attachment; filename=\"" + fileName + "\"");
+                                      resp.addHeader("Access-Control-Allow-Origin", "*");
+                                      return resp;
+                                  } catch (FileNotFoundException e) {}
+                              }
+                          }
+                          return newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "File not found");
+                      } else {
+                          Response resp = newFixedLengthResponse("SMS Backup Server active. Use /backup or /list");
+                          resp.addHeader("Access-Control-Allow-Origin", "*");
+                          return resp;
+                      }
+                  }
+              }
+          }
+          EOF
+
+      - name: Write strings.xml
+        run: |
+          cat > app/src/main/res/values/strings.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="app_name">SMS Backup Remote</string>
+          </resources>
+          EOF
+
+      - name: Write project build.gradle
+        run: |
+          cat > build.gradle << 'EOF'
+          buildscript {
+              repositories { google(); mavenCentral() }
+              dependencies { classpath 'com.android.tools.build:gradle:7.4.2' }
+          }
+          allprojects {
+              repositories { google(); mavenCentral() }
+          }
+          EOF
+
+      - name: Write settings.gradle
+        run: echo "include ':app'" > settings.gradle
+
+      - name: Write gradle.properties
+        run: |
+          cat > gradle.properties << 'EOF'
+          org.gradle.jvmargs=-Xmx2048m
+          android.useAndroidX=true
+          EOF
+
+      - name: Write app/build.gradle
+        run: |
+          cat > app/build.gradle << 'EOF'
+          plugins { id 'com.android.application' }
+          android {
+              namespace 'com.example.smsbackup'
+              compileSdk 33
+              defaultConfig {
+                  applicationId "com.example.smsbackup"
+                  minSdk 21
+                  targetSdk 33
+                  versionCode 1
+                  versionName "1.0"
+              }
+              buildTypes { debug { debuggable true } }
+          }
+          dependencies {
+              implementation 'org.nanohttpd:nanohttpd:2.3.1'
+              implementation 'androidx.appcompat:appcompat:1.6.1'
+          }
+          EOF
+
+      - name: Build APK
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '7.5'
+          arguments: assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: sms-backup-app
+          path: app/build/outputs/apk/debug/*.apk
