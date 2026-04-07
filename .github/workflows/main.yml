@@ -1,4 +1,4 @@
-name: Build SMS Backup APK (32-bit compatible)
+name: Build Simple SMS Backup APK
 
 on:
   push:
@@ -19,15 +19,15 @@ jobs:
 
       - name: Create project structure
         run: |
-          mkdir -p app/src/main/java/com/example/smsbackup
+          mkdir -p app/src/main/java/com/simple/smsbackup
           mkdir -p app/src/main/res/values
 
-      - name: Write AndroidManifest.xml (targetSdk 22 untuk kompatibilitas)
+      - name: Write AndroidManifest.xml
         run: |
           cat > app/src/main/AndroidManifest.xml << 'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-              package="com.example.smsbackup">
+              package="com.simple.smsbackup">
               <uses-permission android:name="android.permission.READ_SMS" />
               <uses-permission android:name="android.permission.INTERNET" />
               <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
@@ -43,61 +43,61 @@ jobs:
           </manifest>
           EOF
 
-      - name: Write MainActivity.java (dengan error handling dan logging)
+      - name: Write MainActivity.java (simple, tanpa library eksternal)
         run: |
-          cat > app/src/main/java/com/example/smsbackup/MainActivity.java << 'EOF'
-          package com.example.smsbackup;
+          cat > app/src/main/java/com/simple/smsbackup/MainActivity.java << 'EOF'
+          package com.simple.smsbackup;
           import android.Manifest;
           import android.content.pm.PackageManager;
           import android.database.Cursor;
           import android.net.Uri;
           import android.os.Bundle;
           import android.os.Environment;
+          import android.os.Handler;
+          import android.os.Looper;
           import android.widget.*;
           import androidx.annotation.NonNull;
           import androidx.appcompat.app.AppCompatActivity;
           import androidx.core.app.ActivityCompat;
           import androidx.core.content.ContextCompat;
           import java.io.*;
+          import java.net.ServerSocket;
+          import java.net.Socket;
           import java.text.SimpleDateFormat;
           import java.util.Date;
           import java.util.Locale;
-          import fi.iki.elonen.NanoHTTPD;
           public class MainActivity extends AppCompatActivity {
               private static final int PERMISSION_REQUEST_CODE = 123;
-              private SimpleServer server;
+              private ServerThread serverThread;
               private TextView statusText;
               private Button startStopBtn;
+              private boolean isServerRunning = false;
+              private Handler mainHandler;
               @Override
               protected void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
-                  try {
-                      LinearLayout layout = new LinearLayout(this);
-                      layout.setOrientation(LinearLayout.VERTICAL);
-                      layout.setPadding(50,50,50,50);
-                      statusText = new TextView(this);
-                      statusText.setText("Server status: Stopped");
-                      startStopBtn = new Button(this);
-                      startStopBtn.setText("Start Server");
-                      startStopBtn.setOnClickListener(v -> toggleServer());
-                      Button manualBackup = new Button(this);
-                      manualBackup.setText("Manual Backup SMS");
-                      manualBackup.setOnClickListener(v -> doBackup());
-                      layout.addView(statusText);
-                      layout.addView(startStopBtn);
-                      layout.addView(manualBackup);
-                      setContentView(layout);
-                      checkPermissions();
-                  } catch (Exception e) {
-                      Toast.makeText(this, "Error: " + e.getMessage(), Toast.LENGTH_LONG).show();
-                      e.printStackTrace();
-                  }
+                  mainHandler = new Handler(Looper.getMainLooper());
+                  LinearLayout layout = new LinearLayout(this);
+                  layout.setOrientation(LinearLayout.VERTICAL);
+                  layout.setPadding(50,50,50,50);
+                  statusText = new TextView(this);
+                  statusText.setText("Server: OFF");
+                  startStopBtn = new Button(this);
+                  startStopBtn.setText("Start Server");
+                  startStopBtn.setOnClickListener(v -> toggleServer());
+                  Button manualBackup = new Button(this);
+                  manualBackup.setText("Manual Backup SMS");
+                  manualBackup.setOnClickListener(v -> doBackup());
+                  layout.addView(statusText);
+                  layout.addView(startStopBtn);
+                  layout.addView(manualBackup);
+                  setContentView(layout);
+                  checkPermissions();
               }
               private void checkPermissions() {
-                  String[] perms = {Manifest.permission.READ_SMS, Manifest.permission.WRITE_EXTERNAL_STORAGE};
                   if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_SMS) != PackageManager.PERMISSION_GRANTED ||
                       ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
-                      ActivityCompat.requestPermissions(this, perms, PERMISSION_REQUEST_CODE);
+                      ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.READ_SMS, Manifest.permission.WRITE_EXTERNAL_STORAGE}, PERMISSION_REQUEST_CODE);
                   }
               }
               @Override
@@ -105,135 +105,181 @@ jobs:
                   super.onRequestPermissionsResult(requestCode, permissions, grantResults);
                   if (requestCode == PERMISSION_REQUEST_CODE) {
                       if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED)
-                          Toast.makeText(this, "Permission granted", Toast.LENGTH_SHORT).show();
+                          Toast.makeText(this, "Izin diberikan", Toast.LENGTH_SHORT).show();
                       else
-                          Toast.makeText(this, "SMS permission needed", Toast.LENGTH_LONG).show();
+                          Toast.makeText(this, "Izin SMS diperlukan", Toast.LENGTH_LONG).show();
                   }
               }
               private void toggleServer() {
-                  if (server == null) {
-                      try {
-                          server = new SimpleServer(8080, this);
-                          server.start();
-                          startStopBtn.setText("Stop Server");
-                          statusText.setText("Server status: Running on port 8080");
-                          Toast.makeText(this, "Server started on port 8080", Toast.LENGTH_SHORT).show();
-                      } catch (IOException e) {
-                          Toast.makeText(this, "Failed to start server: " + e.getMessage(), Toast.LENGTH_LONG).show();
-                          e.printStackTrace();
-                      }
+                  if (isServerRunning) {
+                      stopServer();
                   } else {
-                      server.stop();
-                      server = null;
-                      startStopBtn.setText("Start Server");
-                      statusText.setText("Server status: Stopped");
+                      startServer();
                   }
               }
+              private void startServer() {
+                  serverThread = new ServerThread();
+                  serverThread.start();
+                  isServerRunning = true;
+                  startStopBtn.setText("Stop Server");
+                  statusText.setText("Server: ON (port 8080)");
+                  Toast.makeText(this, "Server started on port 8080", Toast.LENGTH_SHORT).show();
+              }
+              private void stopServer() {
+                  if (serverThread != null) {
+                      serverThread.stopServer();
+                      serverThread = null;
+                  }
+                  isServerRunning = false;
+                  startStopBtn.setText("Start Server");
+                  statusText.setText("Server: OFF");
+                  Toast.makeText(this, "Server stopped", Toast.LENGTH_SHORT).show();
+              }
               private void doBackup() {
-                  String xml = exportSmsToXml();
-                  if (xml != null) Toast.makeText(this, "Backup saved: " + xml, Toast.LENGTH_LONG).show();
-                  else Toast.makeText(this, "Backup failed", Toast.LENGTH_LONG).show();
+                  String path = exportSmsToXml();
+                  if (path != null)
+                      Toast.makeText(this, "Backup saved: " + path, Toast.LENGTH_LONG).show();
+                  else
+                      Toast.makeText(this, "Backup failed", Toast.LENGTH_LONG).show();
               }
               private String exportSmsToXml() {
                   if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_SMS) != PackageManager.PERMISSION_GRANTED) return null;
-                  StringBuilder xmlBuilder = new StringBuilder();
-                  xmlBuilder.append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<smses>\n");
-                  Uri uri = Uri.parse("content://sms/inbox");
-                  Cursor cursor = null;
-                  try {
-                      cursor = getContentResolver().query(uri, null, null, null, "date ASC");
-                      if (cursor != null) {
-                          while (cursor.moveToNext()) {
-                              String address = cursor.getString(cursor.getColumnIndexOrThrow("address"));
-                              String body = cursor.getString(cursor.getColumnIndexOrThrow("body"));
-                              long date = cursor.getLong(cursor.getColumnIndexOrThrow("date"));
-                              xmlBuilder.append(String.format(Locale.US, "  <sms type=\"inbox\" address=\"%s\" date=\"%d\">%s</sms>\n", escapeXml(address), date, escapeXml(body)));
-                          }
-                          cursor.close();
+                  StringBuilder sb = new StringBuilder();
+                  sb.append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<smses>\n");
+                  // Inbox
+                  Cursor c = getContentResolver().query(Uri.parse("content://sms/inbox"), null, null, null, "date ASC");
+                  if (c != null) {
+                      while (c.moveToNext()) {
+                          String addr = c.getString(c.getColumnIndex("address"));
+                          String body = c.getString(c.getColumnIndex("body"));
+                          long date = c.getLong(c.getColumnIndex("date"));
+                          sb.append(String.format(Locale.US, "  <sms type=\"inbox\" address=\"%s\" date=\"%d\">%s</sms>\n", escapeXml(addr), date, escapeXml(body)));
                       }
-                      uri = Uri.parse("content://sms/sent");
-                      cursor = getContentResolver().query(uri, null, null, null, "date ASC");
-                      if (cursor != null) {
-                          while (cursor.moveToNext()) {
-                              String address = cursor.getString(cursor.getColumnIndexOrThrow("address"));
-                              String body = cursor.getString(cursor.getColumnIndexOrThrow("body"));
-                              long date = cursor.getLong(cursor.getColumnIndexOrThrow("date"));
-                              xmlBuilder.append(String.format(Locale.US, "  <sms type=\"sent\" address=\"%s\" date=\"%d\">%s</sms>\n", escapeXml(address), date, escapeXml(body)));
-                          }
-                          cursor.close();
-                      }
-                  } catch (Exception e) {
-                      e.printStackTrace();
-                      return null;
-                  } finally {
-                      if (cursor != null) cursor.close();
+                      c.close();
                   }
-                  xmlBuilder.append("</smses>");
+                  // Sent
+                  c = getContentResolver().query(Uri.parse("content://sms/sent"), null, null, null, "date ASC");
+                  if (c != null) {
+                      while (c.moveToNext()) {
+                          String addr = c.getString(c.getColumnIndex("address"));
+                          String body = c.getString(c.getColumnIndex("body"));
+                          long date = c.getLong(c.getColumnIndex("date"));
+                          sb.append(String.format(Locale.US, "  <sms type=\"sent\" address=\"%s\" date=\"%d\">%s</sms>\n", escapeXml(addr), date, escapeXml(body)));
+                      }
+                      c.close();
+                  }
+                  sb.append("</smses>");
                   String filename = "sms_backup_" + new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date()) + ".xml";
                   File dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
                   if (!dir.exists()) dir.mkdirs();
                   File file = new File(dir, filename);
-                  try (FileWriter fw = new FileWriter(file)) { fw.write(xmlBuilder.toString()); return file.getAbsolutePath(); }
-                  catch (IOException e) { return null; }
+                  try (FileWriter fw = new FileWriter(file)) {
+                      fw.write(sb.toString());
+                      return file.getAbsolutePath();
+                  } catch (IOException e) {
+                      e.printStackTrace();
+                      return null;
+                  }
               }
               private String escapeXml(String s) {
                   if (s == null) return "";
                   return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;");
               }
-              private class SimpleServer extends NanoHTTPD {
-                  private MainActivity activity;
-                  public SimpleServer(int port, MainActivity act) throws IOException { super(port); activity = act; }
-                  @Override
-                  public Response serve(IHTTPSession session) {
-                      String uri = session.getUri();
-                      if ("/backup".equals(uri)) {
-                          String filePath = activity.exportSmsToXml();
-                          if (filePath != null) {
-                              File file = new File(filePath);
-                              if (file.exists()) {
-                                  Response resp = newFixedLengthResponse(Response.Status.OK, "application/xml", null);
-                                  try {
-                                      resp.setData(new FileInputStream(file));
-                                      resp.addHeader("Content-Length", String.valueOf(file.length()));
-                                  } catch (FileNotFoundException e) {
-                                      return newFixedLengthResponse(Response.Status.INTERNAL_ERROR, "text/plain", "File not found");
-                                  }
-                                  resp.addHeader("Content-Disposition", "attachment; filename=\"" + file.getName() + "\"");
-                                  resp.addHeader("Access-Control-Allow-Origin", "*");
-                                  return resp;
-                              }
+              // Simple HTTP server using ServerSocket
+              class ServerThread extends Thread {
+                  private ServerSocket serverSocket;
+                  private boolean running = true;
+                  public void run() {
+                      try {
+                          serverSocket = new ServerSocket(8080);
+                          while (running) {
+                              Socket client = serverSocket.accept();
+                              handleClient(client);
                           }
-                          return newFixedLengthResponse(Response.Status.INTERNAL_ERROR, "text/plain", "Backup failed");
-                      } else if ("/list".equals(uri)) {
-                          File dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
-                          File[] files = dir.listFiles((d, name) -> name.startsWith("sms_backup_") && name.endsWith(".xml"));
-                          StringBuilder html = new StringBuilder("<html><body><ul>");
-                          if (files != null) for (File f : files) html.append("<li><a href='/download?file=").append(f.getName()).append("'>").append(f.getName()).append("</a></li>");
-                          html.append("</ul></body></html>");
-                          Response resp = newFixedLengthResponse(html.toString());
-                          resp.addHeader("Access-Control-Allow-Origin", "*");
-                          return resp;
-                      } else if (uri.startsWith("/download")) {
-                          String fileName = session.getParms().get("file");
-                          if (fileName != null && !fileName.contains("..")) {
-                              File file = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), fileName);
-                              if (file.exists()) {
-                                  try {
-                                      Response resp = newFixedLengthResponse(Response.Status.OK, "application/xml", null);
-                                      resp.setData(new FileInputStream(file));
-                                      resp.addHeader("Content-Length", String.valueOf(file.length()));
-                                      resp.addHeader("Content-Disposition", "attachment; filename=\"" + fileName + "\"");
-                                      resp.addHeader("Access-Control-Allow-Origin", "*");
-                                      return resp;
-                                  } catch (FileNotFoundException e) {}
-                              }
-                          }
-                          return newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "File not found");
-                      } else {
-                          Response resp = newFixedLengthResponse("SMS Backup Server active. Use /backup or /list");
-                          resp.addHeader("Access-Control-Allow-Origin", "*");
-                          return resp;
+                      } catch (Exception e) {
+                          e.printStackTrace();
                       }
+                  }
+                  private void handleClient(Socket client) {
+                      try {
+                          BufferedReader in = new BufferedReader(new InputStreamReader(client.getInputStream()));
+                          String request = in.readLine();
+                          if (request == null) return;
+                          String path = "";
+                          if (request.startsWith("GET ")) {
+                              path = request.split(" ")[1];
+                          }
+                          OutputStream out = client.getOutputStream();
+                          if (path.equals("/backup")) {
+                              String filePath = exportSmsToXml();
+                              if (filePath != null) {
+                                  File file = new File(filePath);
+                                  if (file.exists()) {
+                                      byte[] fileBytes = new byte[(int) file.length()];
+                                      FileInputStream fis = new FileInputStream(file);
+                                      fis.read(fileBytes);
+                                      fis.close();
+                                      String header = "HTTP/1.1 200 OK\r\n" +
+                                              "Content-Type: application/xml\r\n" +
+                                              "Content-Disposition: attachment; filename=\"" + file.getName() + "\"\r\n" +
+                                              "Content-Length: " + fileBytes.length + "\r\n" +
+                                              "Access-Control-Allow-Origin: *\r\n\r\n";
+                                      out.write(header.getBytes());
+                                      out.write(fileBytes);
+                                  } else {
+                                      out.write("HTTP/1.1 500 Error\r\n\r\nBackup file not found".getBytes());
+                                  }
+                              } else {
+                                  out.write("HTTP/1.1 500 Error\r\n\r\nBackup failed".getBytes());
+                              }
+                          } else if (path.equals("/list")) {
+                              File dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+                              File[] files = dir.listFiles((d, name) -> name.startsWith("sms_backup_") && name.endsWith(".xml"));
+                              StringBuilder html = new StringBuilder("<html><body><ul>");
+                              if (files != null) {
+                                  for (File f : files) {
+                                      html.append("<li><a href='/download?file=").append(f.getName()).append("'>").append(f.getName()).append("</a></li>");
+                                  }
+                              }
+                              html.append("</ul></body></html>");
+                              String response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nAccess-Control-Allow-Origin: *\r\n\r\n" + html.toString();
+                              out.write(response.getBytes());
+                          } else if (path.startsWith("/download")) {
+                              String fileName = path.substring(path.indexOf("file=") + 5);
+                              if (fileName.contains("&")) fileName = fileName.split("&")[0];
+                              File dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+                              File file = new File(dir, fileName);
+                              if (file.exists() && !fileName.contains("..")) {
+                                  byte[] fileBytes = new byte[(int) file.length()];
+                                  FileInputStream fis = new FileInputStream(file);
+                                  fis.read(fileBytes);
+                                  fis.close();
+                                  String header = "HTTP/1.1 200 OK\r\n" +
+                                          "Content-Type: application/xml\r\n" +
+                                          "Content-Disposition: attachment; filename=\"" + fileName + "\"\r\n" +
+                                          "Content-Length: " + fileBytes.length + "\r\n" +
+                                          "Access-Control-Allow-Origin: *\r\n\r\n";
+                                  out.write(header.getBytes());
+                                  out.write(fileBytes);
+                              } else {
+                                  out.write("HTTP/1.1 404 Not Found\r\n\r\nFile not found".getBytes());
+                              }
+                          } else {
+                              String msg = "SMS Backup Server. Use /backup or /list";
+                              String response = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nAccess-Control-Allow-Origin: *\r\n\r\n" + msg;
+                              out.write(response.getBytes());
+                          }
+                          out.flush();
+                          out.close();
+                          in.close();
+                          client.close();
+                      } catch (Exception e) {
+                          e.printStackTrace();
+                      }
+                  }
+                  public void stopServer() {
+                      running = false;
+                      try { if (serverSocket != null) serverSocket.close(); } catch (Exception e) {}
                   }
               }
           }
@@ -244,7 +290,7 @@ jobs:
           cat > app/src/main/res/values/strings.xml << 'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <resources>
-              <string name="app_name">SMS Backup Remote</string>
+              <string name="app_name">SMS Backup</string>
           </resources>
           EOF
 
@@ -270,27 +316,23 @@ jobs:
           android.useAndroidX=true
           EOF
 
-      - name: Write app/build.gradle (targetSdk 22, abiFilters untuk 32-bit)
+      - name: Write app/build.gradle (sederhana, tanpa ndk)
         run: |
           cat > app/build.gradle << 'EOF'
           plugins { id 'com.android.application' }
           android {
-              namespace 'com.example.smsbackup'
+              namespace 'com.simple.smsbackup'
               compileSdk 33
               defaultConfig {
-                  applicationId "com.example.smsbackup"
+                  applicationId "com.simple.smsbackup"
                   minSdk 21
                   targetSdk 22
                   versionCode 1
                   versionName "1.0"
-                  ndk {
-                      abiFilters 'armeabi-v7a', 'arm64-v8a'
-                  }
               }
               buildTypes { debug { debuggable true } }
           }
           dependencies {
-              implementation 'org.nanohttpd:nanohttpd:2.3.1'
               implementation 'androidx.appcompat:appcompat:1.6.1'
           }
           EOF
@@ -304,5 +346,5 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: sms-backup-app-32bit
+          name: sms-backup-simple
           path: app/build/outputs/apk/debug/*.apk
