@@ -1,4 +1,4 @@
-name: Build SMS Backup APK
+name: Build SMS Backup APK (32-bit compatible)
 
 on:
   push:
@@ -22,7 +22,7 @@ jobs:
           mkdir -p app/src/main/java/com/example/smsbackup
           mkdir -p app/src/main/res/values
 
-      - name: Write AndroidManifest.xml
+      - name: Write AndroidManifest.xml (targetSdk 22 untuk kompatibilitas)
         run: |
           cat > app/src/main/AndroidManifest.xml << 'EOF'
           <?xml version="1.0" encoding="utf-8"?>
@@ -43,7 +43,7 @@ jobs:
           </manifest>
           EOF
 
-      - name: Write MainActivity.java (fixed)
+      - name: Write MainActivity.java (dengan error handling dan logging)
         run: |
           cat > app/src/main/java/com/example/smsbackup/MainActivity.java << 'EOF'
           package com.example.smsbackup;
@@ -71,22 +71,27 @@ jobs:
               @Override
               protected void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
-                  LinearLayout layout = new LinearLayout(this);
-                  layout.setOrientation(LinearLayout.VERTICAL);
-                  layout.setPadding(50,50,50,50);
-                  statusText = new TextView(this);
-                  statusText.setText("Server status: Stopped");
-                  startStopBtn = new Button(this);
-                  startStopBtn.setText("Start Server");
-                  startStopBtn.setOnClickListener(v -> toggleServer());
-                  Button manualBackup = new Button(this);
-                  manualBackup.setText("Manual Backup SMS");
-                  manualBackup.setOnClickListener(v -> doBackup());
-                  layout.addView(statusText);
-                  layout.addView(startStopBtn);
-                  layout.addView(manualBackup);
-                  setContentView(layout);
-                  checkPermissions();
+                  try {
+                      LinearLayout layout = new LinearLayout(this);
+                      layout.setOrientation(LinearLayout.VERTICAL);
+                      layout.setPadding(50,50,50,50);
+                      statusText = new TextView(this);
+                      statusText.setText("Server status: Stopped");
+                      startStopBtn = new Button(this);
+                      startStopBtn.setText("Start Server");
+                      startStopBtn.setOnClickListener(v -> toggleServer());
+                      Button manualBackup = new Button(this);
+                      manualBackup.setText("Manual Backup SMS");
+                      manualBackup.setOnClickListener(v -> doBackup());
+                      layout.addView(statusText);
+                      layout.addView(startStopBtn);
+                      layout.addView(manualBackup);
+                      setContentView(layout);
+                      checkPermissions();
+                  } catch (Exception e) {
+                      Toast.makeText(this, "Error: " + e.getMessage(), Toast.LENGTH_LONG).show();
+                      e.printStackTrace();
+                  }
               }
               private void checkPermissions() {
                   String[] perms = {Manifest.permission.READ_SMS, Manifest.permission.WRITE_EXTERNAL_STORAGE};
@@ -112,8 +117,10 @@ jobs:
                           server.start();
                           startStopBtn.setText("Stop Server");
                           statusText.setText("Server status: Running on port 8080");
+                          Toast.makeText(this, "Server started on port 8080", Toast.LENGTH_SHORT).show();
                       } catch (IOException e) {
                           Toast.makeText(this, "Failed to start server: " + e.getMessage(), Toast.LENGTH_LONG).show();
+                          e.printStackTrace();
                       }
                   } else {
                       server.stop();
@@ -132,26 +139,34 @@ jobs:
                   StringBuilder xmlBuilder = new StringBuilder();
                   xmlBuilder.append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<smses>\n");
                   Uri uri = Uri.parse("content://sms/inbox");
-                  Cursor cursor = getContentResolver().query(uri, null, null, null, "date ASC");
-                  if (cursor != null) {
-                      while (cursor.moveToNext()) {
-                          String address = cursor.getString(cursor.getColumnIndexOrThrow("address"));
-                          String body = cursor.getString(cursor.getColumnIndexOrThrow("body"));
-                          long date = cursor.getLong(cursor.getColumnIndexOrThrow("date"));
-                          xmlBuilder.append(String.format(Locale.US, "  <sms type=\"inbox\" address=\"%s\" date=\"%d\">%s</sms>\n", escapeXml(address), date, escapeXml(body)));
+                  Cursor cursor = null;
+                  try {
+                      cursor = getContentResolver().query(uri, null, null, null, "date ASC");
+                      if (cursor != null) {
+                          while (cursor.moveToNext()) {
+                              String address = cursor.getString(cursor.getColumnIndexOrThrow("address"));
+                              String body = cursor.getString(cursor.getColumnIndexOrThrow("body"));
+                              long date = cursor.getLong(cursor.getColumnIndexOrThrow("date"));
+                              xmlBuilder.append(String.format(Locale.US, "  <sms type=\"inbox\" address=\"%s\" date=\"%d\">%s</sms>\n", escapeXml(address), date, escapeXml(body)));
+                          }
+                          cursor.close();
                       }
-                      cursor.close();
-                  }
-                  uri = Uri.parse("content://sms/sent");
-                  cursor = getContentResolver().query(uri, null, null, null, "date ASC");
-                  if (cursor != null) {
-                      while (cursor.moveToNext()) {
-                          String address = cursor.getString(cursor.getColumnIndexOrThrow("address"));
-                          String body = cursor.getString(cursor.getColumnIndexOrThrow("body"));
-                          long date = cursor.getLong(cursor.getColumnIndexOrThrow("date"));
-                          xmlBuilder.append(String.format(Locale.US, "  <sms type=\"sent\" address=\"%s\" date=\"%d\">%s</sms>\n", escapeXml(address), date, escapeXml(body)));
+                      uri = Uri.parse("content://sms/sent");
+                      cursor = getContentResolver().query(uri, null, null, null, "date ASC");
+                      if (cursor != null) {
+                          while (cursor.moveToNext()) {
+                              String address = cursor.getString(cursor.getColumnIndexOrThrow("address"));
+                              String body = cursor.getString(cursor.getColumnIndexOrThrow("body"));
+                              long date = cursor.getLong(cursor.getColumnIndexOrThrow("date"));
+                              xmlBuilder.append(String.format(Locale.US, "  <sms type=\"sent\" address=\"%s\" date=\"%d\">%s</sms>\n", escapeXml(address), date, escapeXml(body)));
+                          }
+                          cursor.close();
                       }
-                      cursor.close();
+                  } catch (Exception e) {
+                      e.printStackTrace();
+                      return null;
+                  } finally {
+                      if (cursor != null) cursor.close();
                   }
                   xmlBuilder.append("</smses>");
                   String filename = "sms_backup_" + new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date()) + ".xml";
@@ -255,7 +270,7 @@ jobs:
           android.useAndroidX=true
           EOF
 
-      - name: Write app/build.gradle
+      - name: Write app/build.gradle (targetSdk 22, abiFilters untuk 32-bit)
         run: |
           cat > app/build.gradle << 'EOF'
           plugins { id 'com.android.application' }
@@ -265,9 +280,12 @@ jobs:
               defaultConfig {
                   applicationId "com.example.smsbackup"
                   minSdk 21
-                  targetSdk 33
+                  targetSdk 22
                   versionCode 1
                   versionName "1.0"
+                  ndk {
+                      abiFilters 'armeabi-v7a', 'arm64-v8a'
+                  }
               }
               buildTypes { debug { debuggable true } }
           }
@@ -286,5 +304,5 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: sms-backup-app
+          name: sms-backup-app-32bit
           path: app/build/outputs/apk/debug/*.apk
